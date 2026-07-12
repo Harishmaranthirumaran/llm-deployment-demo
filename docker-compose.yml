@@ -1,0 +1,83 @@
+# Self-hosted LLM stack — vLLM inference server + Streamlit chat UI
+# Author: Harishmaran Subbaiah Thirumaran
+#
+# Usage:
+#   GPU instance:  docker compose --profile gpu up
+#   CPU only:      docker compose --profile cpu up
+
+version: "3.9"
+
+x-vllm-base: &vllm-base
+  image: vllm/vllm-openai:latest
+  environment:
+    - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+  volumes:
+    - hf-cache:/root/.cache/huggingface
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    interval: 30s
+    timeout: 10s
+    retries: 5
+    start_period: 60s
+
+services:
+
+  # ── vLLM inference server (GPU) ────────────────────────────────────────────
+  vllm-gpu:
+    <<: *vllm-base
+    profiles: [gpu]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: >
+      --model mistralai/Mistral-7B-Instruct-v0.2
+      --tensor-parallel-size 1
+      --max-model-len 4096
+    ports:
+      - "8000:8000"
+
+  # ── vLLM inference server (CPU fallback) ──────────────────────────────────
+  vllm-cpu:
+    <<: *vllm-base
+    profiles: [cpu]
+    command: >
+      --model facebook/opt-125m
+      --device cpu
+      --max-model-len 1024
+    ports:
+      - "8000:8000"
+
+  # ── Streamlit chat UI ──────────────────────────────────────────────────────
+  chat-ui:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - VLLM_HOST=http://vllm-gpu:8000
+      - MODEL_NAME=mistralai/Mistral-7B-Instruct-v0.2
+    depends_on:
+      vllm-gpu:
+        condition: service_healthy
+    profiles: [gpu]
+    restart: unless-stopped
+
+  chat-ui-cpu:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - VLLM_HOST=http://vllm-cpu:8000
+      - MODEL_NAME=facebook/opt-125m
+    depends_on:
+      vllm-cpu:
+        condition: service_healthy
+    profiles: [cpu]
+    restart: unless-stopped
+
+volumes:
+  hf-cache:
